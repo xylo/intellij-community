@@ -25,9 +25,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.swing.*;
-import javax.swing.event.ListSelectionEvent;
-import javax.swing.event.ListSelectionListener;
-import javax.swing.event.PopupMenuEvent;
+import javax.swing.event.*;
 import javax.swing.plaf.basic.ComboPopup;
 import java.awt.*;
 import java.awt.event.ItemEvent;
@@ -46,7 +44,10 @@ public class XFramesView extends XDebugView {
   private final JPanel myMainPanel;
   private final XDebuggerFramesList myFramesList;
   private final ComboBox<XExecutionStack> myThreadComboBox;
+  private final JTextField myThreadFilterField;
   private final TObjectIntHashMap<XExecutionStack> myExecutionStacksWithSelection = new TObjectIntHashMap<>();
+  private final List<XExecutionStack> myExecutionStacks = new ArrayList<>();
+  private final Map<XExecutionStack, Optional<String>> myExecutionStackToStackTrace = new HashMap<>();
   private XExecutionStack mySelectedStack;
   private int mySelectedFrameIndex;
   private Rectangle myVisibleRect;
@@ -150,12 +151,70 @@ public class XFramesView extends XDebugView {
         return ((XExecutionStack)element).getDisplayName();
       }
     };
+    myThreadComboBox.setMaximumSize(new Dimension(150, (int) myThreadComboBox.getMaximumSize().getHeight()));
+
+    myThreadFilterField = new JTextField();
+    myThreadFilterField.getDocument().addDocumentListener(new DocumentListener() {
+      @Override
+      public void insertUpdate(DocumentEvent e) {
+        changedUpdate(e);
+      }
+
+      @Override
+      public void removeUpdate(DocumentEvent e) {
+        changedUpdate(e);
+      }
+
+      @Override
+      public void changedUpdate(DocumentEvent e) {
+        ApplicationManager.getApplication().invokeLater(() -> {
+          // set items of myThreadComboBox to the filtered ones
+          myThreadComboBox.removeAllItems();
+          myExecutionStacks.stream().filter(s -> matchesFilter(s)).forEach(s -> myThreadComboBox.addItem(s));
+        });
+      }
+    });
 
     myToolbar = createToolbar();
     myThreadsPanel = new Wrapper();
     myThreadsPanel.setBorder(new CustomLineBorder(CaptionPanel.CNT_ACTIVE_BORDER_COLOR, 0, 0, 1, 0));
     myThreadsPanel.add(myToolbar.getComponent(), BorderLayout.EAST);
     myMainPanel.add(myThreadsPanel, BorderLayout.NORTH);
+  }
+
+  private class StackTraceBuilder implements XStackFrameContainerEx {
+    private final XExecutionStack myStack;
+    private final StringBuffer myStackTraceBuilder = new StringBuffer();
+
+    public StackTraceBuilder(XExecutionStack stack) {
+      this.myStack = stack;
+    }
+
+    @Override
+    public void addStackFrames(@NotNull List<? extends XStackFrame> stackFrames, @Nullable XStackFrame toSelect, boolean last) {
+      addStackFrames(stackFrames, last);
+    }
+
+    @Override
+    public void addStackFrames(@NotNull List<? extends XStackFrame> stackFrames, boolean last) {
+      for (XStackFrame frame : stackFrames) {
+        myStackTraceBuilder.append(frame.toString()).append('\n');
+      }
+      //myFrames.addAll(stackFrames);
+
+      if (last) {
+        synchronized (myExecutionStackToStackTrace) {
+          myExecutionStackToStackTrace.put(myStack, Optional.of(myStackTraceBuilder.toString()));
+        }
+      }
+    }
+
+    @Override
+    public void errorOccurred(@NotNull String errorMessage) {
+      synchronized (myExecutionStackToStackTrace) {
+        myExecutionStackToStackTrace.put(myStack, Optional.empty());
+      }
+    }
   }
 
   private class ThreadsBuilder implements XSuspendContext.XExecutionStackContainer {
@@ -289,7 +348,13 @@ public class XFramesView extends XDebugView {
       myThreadsPanel.add(myToolbar.getComponent(), BorderLayout.EAST);
       final boolean invisible = executionStacks.length == 1 && StringUtil.isEmpty(executionStacks[0].getDisplayName());
       if (!invisible) {
-        myThreadsPanel.add(myThreadComboBox, BorderLayout.CENTER);
+        final JPanel threadComboBoxAndFilterField = new JPanel() {{
+          setLayout(new GridLayout(1, 2));
+          add(myThreadComboBox);
+          add(myThreadFilterField);
+        }};
+
+        myThreadsPanel.add(threadComboBoxAndFilterField, BorderLayout.CENTER);
       }
       myToolbar.setAddSeparatorFirst(!invisible);
       updateFrames(activeExecutionStack, session, event == SessionEvent.FRAME_CHANGED ? currentStackFrame : null);
@@ -302,6 +367,7 @@ public class XFramesView extends XDebugView {
     myFramesList.clear();
     myThreadsCalculated = false;
     myExecutionStacksWithSelection.clear();
+    myExecutionStacks.clear();
   }
 
   private void addExecutionStacks(List<? extends XExecutionStack> executionStacks) {
@@ -314,11 +380,32 @@ public class XFramesView extends XDebugView {
           count++;
         }
         else {
-          myThreadComboBox.addItem(executionStack);
+          myExecutionStacks.add(executionStack);
+          if (matchesFilter(executionStack)) {
+            myThreadComboBox.addItem(executionStack);
+          }
         }
         myExecutionStacksWithSelection.put(executionStack, 0);
       }
     }
+  }
+
+  private boolean matchesFilter(XExecutionStack stack) {
+    final String filterString = myThreadFilterField.getText();
+
+    final String[] filters = filterString.split("\\s+");
+
+    Optional<String> stackTrace = myExecutionStackToStackTrace.get(stack);
+    if (stackTrace == null) {
+      //StackFramesListBuilder stackBuilder = new StackFramesListBuilder(stack, session);
+      stack.computeStackFrames(0, new StackTraceBuilder(stack));
+      stackTrace = Optional.empty();
+    }
+    Optional<String> finalStackTrace = stackTrace;
+
+    return Arrays.stream(filters).allMatch(filter -> {
+      return stack.getDisplayName().contains(filter) || finalStackTrace.map(s -> s.contains(filter)).orElse(false);
+    });
   }
 
   private void updateFrames(XExecutionStack executionStack, @NotNull XDebugSession session, @Nullable XStackFrame frameToSelect) {
