@@ -2,7 +2,10 @@
 package com.intellij.xdebugger.impl.frame;
 
 import com.intellij.ide.CommonActionsManager;
-import com.intellij.openapi.actionSystem.*;
+import com.intellij.openapi.actionSystem.ActionGroup;
+import com.intellij.openapi.actionSystem.ActionManager;
+import com.intellij.openapi.actionSystem.ActionPlaces;
+import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.actionSystem.impl.ActionToolbarImpl;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
@@ -46,8 +49,9 @@ public class XFramesView extends XDebugView {
   private final ComboBox<XExecutionStack> myThreadComboBox;
   private final JTextField myThreadFilterField;
   private final TObjectIntHashMap<XExecutionStack> myExecutionStacksWithSelection = new TObjectIntHashMap<>();
-  private final List<XExecutionStack> myExecutionStacks = new ArrayList<>();
+  private final List<XExecutionStack> myUnfilteredExecutionStacks = new ArrayList<>();
   private final Map<XExecutionStack, Optional<String>> myExecutionStackToStackTrace = new HashMap<>();
+  private int computingStackTraces = 0;
   private XExecutionStack mySelectedStack;
   private int mySelectedFrameIndex;
   private Rectangle myVisibleRect;
@@ -170,7 +174,7 @@ public class XFramesView extends XDebugView {
         ApplicationManager.getApplication().invokeLater(() -> {
           // set items of myThreadComboBox to the filtered ones
           myThreadComboBox.removeAllItems();
-          myExecutionStacks.stream().filter(s -> matchesFilter(s)).forEach(s -> myThreadComboBox.addItem(s));
+          myUnfilteredExecutionStacks.stream().filter(s -> matchesFilter(s)).forEach(s -> myThreadComboBox.addItem(s));
         });
       }
     });
@@ -182,6 +186,7 @@ public class XFramesView extends XDebugView {
     myMainPanel.add(myThreadsPanel, BorderLayout.NORTH);
   }
 
+  /** Builds the stack trace of an execution stack to allow to filter on it. */
   private class StackTraceBuilder implements XStackFrameContainerEx {
     private final XExecutionStack myStack;
     private final StringBuffer myStackTraceBuilder = new StringBuffer();
@@ -200,19 +205,45 @@ public class XFramesView extends XDebugView {
       for (XStackFrame frame : stackFrames) {
         myStackTraceBuilder.append(frame.toString()).append('\n');
       }
-      //myFrames.addAll(stackFrames);
 
       if (last) {
         synchronized (myExecutionStackToStackTrace) {
           myExecutionStackToStackTrace.put(myStack, Optional.of(myStackTraceBuilder.toString()));
+          computationDone();
         }
+
+        // eventually add execution stack to combo box if filter is fulfilled
+        ApplicationManager.getApplication().invokeLater(() -> {
+          if (matchesFilter(myStack)) {
+            boolean stackContained = false;
+            for (int i = 0; i < myThreadComboBox.getItemCount() && !stackContained; i++) {
+              final XExecutionStack stack = myThreadComboBox.getItemAt(i);
+              if (stack == myStack) {
+                stackContained = true;
+              }
+            }
+
+            if (!stackContained) {
+              myThreadComboBox.addItem(myStack);
+            }
+          }
+        });
       }
     }
 
     @Override
     public void errorOccurred(@NotNull String errorMessage) {
       synchronized (myExecutionStackToStackTrace) {
-        myExecutionStackToStackTrace.put(myStack, Optional.empty());
+        computationDone();
+      }
+    }
+
+    private void computationDone() {
+      computingStackTraces--;
+      if (computingStackTraces == 0) {
+        ApplicationManager.getApplication().invokeLater(() -> {
+          myThreadFilterField.setBackground(JBColor.WHITE);
+        });
       }
     }
   }
@@ -367,7 +398,7 @@ public class XFramesView extends XDebugView {
     myFramesList.clear();
     myThreadsCalculated = false;
     myExecutionStacksWithSelection.clear();
-    myExecutionStacks.clear();
+    myUnfilteredExecutionStacks.clear();
   }
 
   private void addExecutionStacks(List<? extends XExecutionStack> executionStacks) {
@@ -380,7 +411,7 @@ public class XFramesView extends XDebugView {
           count++;
         }
         else {
-          myExecutionStacks.add(executionStack);
+          myUnfilteredExecutionStacks.add(executionStack);
           if (matchesFilter(executionStack)) {
             myThreadComboBox.addItem(executionStack);
           }
@@ -392,18 +423,35 @@ public class XFramesView extends XDebugView {
 
   private boolean matchesFilter(XExecutionStack stack) {
     final String filterString = myThreadFilterField.getText();
+    final String[] filterTerms = filterString.split("\\s+");
 
-    final String[] filters = filterString.split("\\s+");
+    Optional<String> stackTrace;
 
-    Optional<String> stackTrace = myExecutionStackToStackTrace.get(stack);
-    if (stackTrace == null) {
-      //StackFramesListBuilder stackBuilder = new StackFramesListBuilder(stack, session);
-      stack.computeStackFrames(0, new StackTraceBuilder(stack));
-      stackTrace = Optional.empty();
+    synchronized (myExecutionStackToStackTrace) {
+      // check if a stack trace is a available for the current execution stack
+      stackTrace = myExecutionStackToStackTrace.get(stack);
+
+      if (stackTrace == null) { // stack trace not available yet
+        // prevent another computation of this stack trace by putting an empty stack trace to our map
+        myExecutionStackToStackTrace.put(stack, Optional.empty());
+
+        // start computation of the stack trace in background
+        stack.computeStackFrames(0, new StackTraceBuilder(stack));
+        computingStackTraces++;
+        if (computingStackTraces == 1) {
+          ApplicationManager.getApplication().invokeLater(() -> {
+            myThreadFilterField.setBackground(JBColor.YELLOW);
+          });
+        }
+
+        stackTrace = Optional.empty();
+      }
     }
-    Optional<String> finalStackTrace = stackTrace;
 
-    return Arrays.stream(filters).allMatch(filter -> {
+    final Optional<String> finalStackTrace = stackTrace;
+
+    // execution stack is accepted when each filter term occurs in at least one of these elements: thread name, state, stack trace
+    return Arrays.stream(filterTerms).allMatch(filter -> {
       return stack.getDisplayName().contains(filter) || finalStackTrace.map(s -> s.contains(filter)).orElse(false);
     });
   }
