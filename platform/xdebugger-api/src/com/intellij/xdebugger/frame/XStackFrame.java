@@ -75,4 +75,13 @@ public abstract class XStackFrame extends XValueContainer {
       component.append(XDebuggerBundle.message("invalid.frame"), SimpleTextAttributes.ERROR_ATTRIBUTES);
     }
   }
+
+  /**
+   * @return description of this frame (usually includes package name, class name, method name)
+   */
+  @NotNull
+  public String getDescription() {
+    return toString();
+  }
+
 }

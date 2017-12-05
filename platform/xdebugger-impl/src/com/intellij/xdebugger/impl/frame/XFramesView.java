@@ -203,7 +203,7 @@ public class XFramesView extends XDebugView {
     @Override
     public void addStackFrames(@NotNull List<? extends XStackFrame> stackFrames, boolean last) {
       for (XStackFrame frame : stackFrames) {
-        myStackTraceBuilder.append(frame.toString()).append('\n');
+        myStackTraceBuilder.append(frame.getDescription()).append('\n');
       }
 
       if (last) {
@@ -399,6 +399,7 @@ public class XFramesView extends XDebugView {
     myThreadsCalculated = false;
     myExecutionStacksWithSelection.clear();
     myUnfilteredExecutionStacks.clear();
+    myExecutionStackToStackTrace.clear();
   }
 
   private void addExecutionStacks(List<? extends XExecutionStack> executionStacks) {

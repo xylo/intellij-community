@@ -92,6 +92,12 @@ public class JavaStackFrame extends XStackFrame implements JVMStackFrameInfoProv
     return myDescriptor;
   }
 
+  @Override
+  @NotNull
+  public String getDescription() {
+    return myDescriptor.toString();
+  }
+
   @Nullable
   @Override
   public XDebuggerEvaluator getEvaluator() {
